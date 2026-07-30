@@ -1,8 +1,16 @@
 {
   "name": "pi-wtf",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Recover, rewind, or undo the last user prompt in pi after you realize you messed up.",
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "check": "npm test && npm pack --dry-run",
+    "prepublishOnly": "npm test"
+  },
   "author": "Travis Pew",
   "license": "MIT",
   "keywords": [
@@ -34,7 +42,7 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": ">=0.82.1",
+    "typebox": "*"
   }
 }

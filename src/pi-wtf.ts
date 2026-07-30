@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import { complete, Type } from "@earendil-works/pi-ai";
 import {
 	getAgentDir,
 	type ExtensionAPI,
@@ -10,16 +9,15 @@ import {
 	type SessionEntry,
 	type SessionHeader,
 } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 type UserMessageEntry = SessionEntry & { type: "message"; message: { role: "user" } };
-type FcukConfig = { words?: unknown };
-type ConfigWarning = { path: string; message: string };
 
-const DEFAULT_COMMAND_WORDS = ["fuck"];
+const DEFAULT_COMMAND_WORD = "fuck";
 const CONFIG_FILE_NAME = "wtf.json";
 const COMMAND_WORD_PATTERN = /^[A-Za-z0-9_-]+$/;
 
-function normalizeCommandWords(words: unknown): string[] {
+export function normalizeCommandWords(words: unknown): string[] {
 	if (!Array.isArray(words)) {
 		return [];
 	}
@@ -39,31 +37,21 @@ function normalizeCommandWords(words: unknown): string[] {
 	return [...normalizedWords];
 }
 
-function loadConfiguredWords(): { words: string[]; warning?: ConfigWarning } {
+function loadConfiguredWords(): { words: string[]; invalidConfigPath?: string } {
 	const configPath = join(getAgentDir(), CONFIG_FILE_NAME);
 	if (!existsSync(configPath)) {
-		return { words: DEFAULT_COMMAND_WORDS };
+		return { words: [DEFAULT_COMMAND_WORD] };
 	}
 
 	try {
-		const config = JSON.parse(readFileSync(configPath, "utf-8")) as FcukConfig;
+		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { words?: unknown };
 		const words = normalizeCommandWords(config.words);
 		if (words.length > 0) {
 			return { words };
 		}
-
-		return {
-			words: DEFAULT_COMMAND_WORDS,
-			warning: { path: configPath, message: 'expected { "words": ["fuck"] }' },
-		};
-	} catch (error) {
-		return {
-			words: DEFAULT_COMMAND_WORDS,
-			warning: {
-				path: configPath,
-				message: error instanceof Error ? error.message : String(error),
-			},
-		};
+		return { words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath };
+	} catch {
+		return { words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath };
 	}
 }
 
@@ -80,6 +68,10 @@ function extractUserMessageText(entry: UserMessageEntry): string {
 	return typeof content === "string"
 		? content
 		: content.filter((block) => block.type === "text").map((block) => block.text).join("");
+}
+
+function hasImageAttachments(entry: UserMessageEntry): boolean {
+	return Array.isArray(entry.message.content) && entry.message.content.some((block) => block.type === "image");
 }
 
 function collectSubtreeIds(entries: SessionEntry[], rootId: string): Set<string> {
@@ -100,10 +92,6 @@ function collectSubtreeIds(entries: SessionEntry[], rootId: string): Set<string>
 
 	while (stack.length > 0) {
 		const currentId = stack.pop()!;
-		if (subtreeIds.has(currentId)) {
-			continue;
-		}
-
 		subtreeIds.add(currentId);
 		for (const childId of childrenByParentId.get(currentId) ?? []) {
 			stack.push(childId);
@@ -113,7 +101,7 @@ function collectSubtreeIds(entries: SessionEntry[], rootId: string): Set<string>
 	return subtreeIds;
 }
 
-function removeEntrySubtree(entries: SessionEntry[], rootId: string): SessionEntry[] {
+export function removeEntrySubtree(entries: SessionEntry[], rootId: string): SessionEntry[] {
 	const removedIds = collectSubtreeIds(entries, rootId);
 	return entries.filter((entry) => {
 		if (removedIds.has(entry.id)) {
@@ -132,10 +120,35 @@ function serializeSession(header: SessionHeader, entries: SessionEntry[]): strin
 	return `${[header, ...entries].map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 }
 
-function rewriteSessionInPlace(sessionFile: string, header: SessionHeader, entries: SessionEntry[]): void {
+export function rewriteSessionInPlace(sessionFile: string, content: string): void {
 	const tempFile = join(dirname(sessionFile), `.pi-wtf-${randomUUID()}.tmp`);
-	writeFileSync(tempFile, serializeSession(header, entries));
-	renameSync(tempFile, sessionFile);
+	const mode = statSync(sessionFile).mode;
+
+	try {
+		writeFileSync(tempFile, content, { mode });
+		renameSync(tempFile, sessionFile);
+	} finally {
+		rmSync(tempFile, { force: true });
+	}
+}
+
+export async function rewriteSessionForReplacement(
+	sessionFile: string,
+	content: string,
+	replaceSession: () => Promise<{ cancelled: boolean }>,
+): Promise<boolean> {
+	const originalContent = readFileSync(sessionFile, "utf-8");
+	rewriteSessionInPlace(sessionFile, content);
+
+	let replaced = false;
+	try {
+		replaced = !(await replaceSession()).cancelled;
+		return replaced;
+	} finally {
+		if (!replaced) {
+			rewriteSessionInPlace(sessionFile, originalContent);
+		}
+	}
 }
 
 // pi.getCommands() returns extension, prompt-template, and skill commands, but not
@@ -155,12 +168,14 @@ const BUILTIN_SLASH_COMMANDS = [
 	"fork",
 	"clone",
 	"tree",
+	"trust",
 	"login",
 	"logout",
 	"new",
 	"compact",
 	"resume",
 	"reload",
+	"debug",
 	"quit",
 ];
 
@@ -200,7 +215,7 @@ function levenshteinDistance(a: string, b: string): number {
 
 const MAX_SLASH_COMMAND_TYPO_DISTANCE = 2;
 
-function findClosestSlashCommand(commandName: string, commandNames: string[]): string | undefined {
+export function findClosestSlashCommand(commandName: string, commandNames: string[]): string | undefined {
 	if (commandNames.includes(commandName)) {
 		return undefined;
 	}
@@ -308,27 +323,40 @@ async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandConte
 		return undefined;
 	}
 
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth?.ok || !auth.apiKey) {
-		ctx.ui.notify(auth?.ok === false ? auth.error : "No API key for typo correction", "warning");
+	const provider = ctx.modelRegistry.getProvider(model.provider);
+	if (!provider) {
+		ctx.ui.notify(`No provider available for ${model.provider}`, "warning");
 		return undefined;
 	}
 
-	const response = await complete(
-		model,
-		{
-			systemPrompt: TYPO_FIX_SYSTEM_PROMPT,
-			messages: [
-				{
-					role: "user" as const,
-					content: [{ type: "text" as const, text: buildTypoFixUserPrompt(originalPrompt) }],
-					timestamp: Date.now(),
-				},
-			],
-			tools: [TYPO_FIX_TOOL],
-		},
-		{ apiKey: auth.apiKey, headers: auth.headers },
-	);
+	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+	if (!auth.ok) {
+		ctx.ui.notify(auth.error, "warning");
+		return undefined;
+	}
+
+	const response = await provider
+		.stream(
+			model,
+			{
+				systemPrompt: TYPO_FIX_SYSTEM_PROMPT,
+				messages: [
+					{
+						role: "user" as const,
+						content: [{ type: "text" as const, text: buildTypoFixUserPrompt(originalPrompt) }],
+						timestamp: Date.now(),
+					},
+				],
+				tools: [TYPO_FIX_TOOL],
+			},
+			{
+				apiKey: auth.apiKey,
+				headers: auth.headers,
+				env: auth.env,
+				cacheRetention: "none",
+			},
+		)
+		.result();
 
 	for (const content of response.content) {
 		if (content.type !== "toolCall" || content.name !== "prompt_typo_fixed") {
@@ -363,7 +391,7 @@ async function offerTypoFix(
 			return;
 		}
 
-		if (suggestion.trim() === originalPrompt.trim()) {
+		if (suggestion === originalPrompt) {
 			ctx.ui.notify(`${commandName}: no obvious typo fix found`, "info");
 			return;
 		}
@@ -459,6 +487,14 @@ export default function piWtf(pi: ExtensionAPI) {
 			return undefined;
 		}
 
+		if (hasImageAttachments(lastUserMessage)) {
+			ctx.ui.notify(
+				`Can't /${commandName}: prompts with image attachments can't be restored. Use /tree for manual navigation.`,
+				"warning",
+			);
+			return undefined;
+		}
+
 		const originalPrompt = extractUserMessageText(lastUserMessage);
 		const result = await ctx.navigateTree(lastUserMessage.id);
 		if (result.cancelled) {
@@ -489,6 +525,14 @@ export default function piWtf(pi: ExtensionAPI) {
 			return;
 		}
 
+		if (hasImageAttachments(lastUserMessage)) {
+			ctx.ui.notify(
+				`Can't /${commandName}: prompts with image attachments can't be restored. Use /tree for manual navigation.`,
+				"warning",
+			);
+			return;
+		}
+
 		const sessionFile = ctx.sessionManager.getSessionFile();
 		const sessionHeader = ctx.sessionManager.getHeader();
 		if (!sessionFile || !sessionHeader) {
@@ -496,39 +540,40 @@ export default function piWtf(pi: ExtensionAPI) {
 			return;
 		}
 
-		clearDestructiveCommandActivation();
-
 		// Restore the prompt into the editor first, then delete that prompt's subtree from disk.
 		if ((await ctx.navigateTree(lastUserMessage.id)).cancelled) {
 			ctx.ui.notify("Recovery cancelled.", "info");
 			return;
 		}
 
-		rewriteSessionInPlace(
-			sessionFile,
+		const rewrittenSession = serializeSession(
 			sessionHeader,
 			removeEntrySubtree(ctx.sessionManager.getEntries(), lastUserMessage.id),
 		);
+		const replaced = await rewriteSessionForReplacement(sessionFile, rewrittenSession, () =>
+			ctx.switchSession(sessionFile, {
+				withSession: async (replacementCtx) => {
+					// Pi reports "Resumed session" after withSession returns, so defer this
+					// notification until the session switch has fully finished.
+					setTimeout(() => {
+						replacementCtx.ui.notify(
+							`${commandName}: navigated back to last prompt and dropped messages from session`,
+							"info",
+						);
+					}, 0);
+				},
+			}),
+		);
 
-		await ctx.switchSession(sessionFile, {
-			withSession: async (replacementCtx) => {
-				// Pi reports "Resumed session" after withSession returns, so defer this
-				// notification until the session switch has fully finished.
-				setTimeout(() => {
-					replacementCtx.ui.notify(
-						`${commandName}: navigated back to last prompt and dropped messages from session`,
-						"info",
-					);
-				}, 0);
-			},
-		});
+		if (!replaced) {
+			ctx.ui.notify(`${commandName}: session reload cancelled; no messages were deleted`, "info");
+		}
 	};
 
 	const registerCommandSet = (commandWord: string) => {
 		pi.registerCommand(commandWord, {
 			description: "Abort the current run and recover the last prompt",
 			handler: async (args, ctx) => {
-				clearDestructiveCommandActivation();
 				if (rejectUnexpectedArgs(commandWord, args, ctx)) {
 					return;
 				}
@@ -541,7 +586,6 @@ export default function piWtf(pi: ExtensionAPI) {
 		pi.registerCommand(typoCommandName, {
 			description: "Abort the current run, recover the last prompt, and suggest a typo fix",
 			handler: async (args, ctx) => {
-				clearDestructiveCommandActivation();
 				if (rejectUnexpectedArgs(typoCommandName, args, ctx)) {
 					return;
 				}
@@ -568,12 +612,12 @@ export default function piWtf(pi: ExtensionAPI) {
 
 	pi.on("session_start", (_event, ctx) => {
 		resetSessionState();
-		if (config.warning) {
+		if (config.invalidConfigPath) {
 			// /reload reports its own status after extensions restart, so defer this
 			// notification until the reload flow has finished updating the UI.
 			setTimeout(() => {
 				ctx.ui.notify(
-					`pi-wtf: invalid config at ${config.warning.path}; using /${DEFAULT_COMMAND_WORDS[0]}.`,
+					`pi-wtf: invalid config at ${config.invalidConfigPath}; using /${DEFAULT_COMMAND_WORD}.`,
 					"warning",
 				);
 			}, 0);

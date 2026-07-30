@@ -1,6 +1,6 @@
 # pi-wtf [![NPM Version](https://img.shields.io/npm/v/pi-wtf)](https://www.npmjs.com/package/pi-wtf)
 
-A small [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent) extension for the moment you realize you messed up.
+A small [pi](https://github.com/earendil-works/pi) extension for the moment you realize you messed up.
 
 `/fuck` aborts the current run if needed, rewinds to before the most recent user prompt on the active branch, and restores that prompt into the editor so you can fix it and resubmit.
 
@@ -97,6 +97,7 @@ You can always ask pi to read the README and change the setting itself.
 
 - It works on the **active branch only**
 - It does **not** undo file or external side effects
+- It does **not** restore prompts with image attachments; use `/tree` for those prompts
 - It does **not** work when queued messages exist
 - It does **not** work when compaction is running
 - The typo command requires the current model to support tool calling and have usable credentials
@@ -111,6 +112,16 @@ You can always ask pi to read the README and change the setting itself.
 - /unfuck -> undo your /fuck (with the limitation that aborted agent runs can't be truly continued)
 - allow it to work with queued messages or compaction (may require upstream changes or patching pi)
 - more prompt repair helpers, e.g. `/fuck append ...`, `/fuck s/old/new/`, or `/fuck edit ...`
+
+## Development
+
+Use the Devbox environment, then run the checks:
+
+```bash
+devbox shell
+npm install
+npm run check
+```
 
 ## License
 
