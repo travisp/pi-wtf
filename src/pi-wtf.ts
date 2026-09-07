@@ -103,17 +103,23 @@ function collectSubtreeIds(entries: SessionEntry[], rootId: string): Set<string>
 
 export function removeEntrySubtree(entries: SessionEntry[], rootId: string): SessionEntry[] {
 	const removedIds = collectSubtreeIds(entries, rootId);
-	return entries.filter((entry) => {
-		if (removedIds.has(entry.id)) {
-			return false;
-		}
-
+	const byId = new Map(entries.map((entry) => [entry.id, entry]));
+	for (const entry of entries) {
 		if (entry.type === "label" && removedIds.has(entry.targetId)) {
-			return false;
+			removedIds.add(entry.id);
 		}
+	}
 
-		return true;
-	});
+	return entries
+		.filter((entry) => !removedIds.has(entry.id))
+		.map((entry) => {
+			// Keep children of removed labels attached to their nearest surviving ancestor.
+			let parentId = entry.parentId;
+			while (parentId !== null && removedIds.has(parentId)) {
+				parentId = byId.get(parentId)!.parentId;
+			}
+			return { ...entry, parentId };
+		});
 }
 
 function serializeSession(header: SessionHeader, entries: SessionEntry[]): string {
@@ -546,13 +552,24 @@ export default function piWtf(pi: ExtensionAPI) {
 			return;
 		}
 
-		const rewrittenSession = serializeSession(
-			sessionHeader,
-			removeEntrySubtree(ctx.sessionManager.getEntries(), lastUserMessage.id),
-		);
+		const originalPrompt = extractUserMessageText(lastUserMessage);
+		// Pi resumes at the last entry in the file. A non-message anchor preserves
+		// the recovered position, even at the root or beside a surviving branch.
+		const entries: SessionEntry[] = [
+			...ctx.sessionManager.getEntries(),
+			{
+				type: "custom",
+				id: randomUUID(),
+				parentId: lastUserMessage.parentId,
+				timestamp: new Date().toISOString(),
+				customType: "pi-wtf-recovery",
+			},
+		];
+		const rewrittenSession = serializeSession(sessionHeader, removeEntrySubtree(entries, lastUserMessage.id));
 		const replaced = await rewriteSessionForReplacement(sessionFile, rewrittenSession, () =>
 			ctx.switchSession(sessionFile, {
 				withSession: async (replacementCtx) => {
+					replacementCtx.ui.setEditorText(originalPrompt);
 					// Pi reports "Resumed session" after withSession returns, so defer this
 					// notification until the session switch has fully finished.
 					setTimeout(() => {
@@ -630,11 +647,11 @@ export default function piWtf(pi: ExtensionAPI) {
 		}
 	});
 	pi.on("session_tree", clearDestructiveCommandActivation);
-	pi.on("session_before_compact", ({ signal }) => {
+	pi.on("session_before_compact", () => {
 		isCompacting = true;
-		signal.addEventListener("abort", clearCompactionState, { once: true });
 	});
 	pi.on("session_compact", clearCompactionState);
+	pi.on("session_compact_failed", clearCompactionState);
 
 	for (const commandWord of commandWords) {
 		registerCommandSet(commandWord);

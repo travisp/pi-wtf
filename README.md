@@ -12,6 +12,8 @@ _Inspired by the great [thefuck](https://github.com/nvbn/thefuck)._
 
 ## Install
 
+Requires Pi 0.84.3 or newer.
+
 Install from npm:
 
 ```bash
@@ -57,7 +59,7 @@ If found, it shows the suggestion and asks if the user wants to use the suggesti
 
 **What `/fuck!` does:**
 
-Runs the same recovery as `/fuck`, but then destructively removes that prompt and its descendant subtree from the current session file.
+Runs the same recovery as `/fuck`, but then destructively removes that prompt and its descendant subtree from the current session file. A non-message recovery marker preserves the selected position when the file is reloaded; it adds no model context.
 
 After `/fuck!` succeeds, or after tree navigation, it becomes unavailable until another real user prompt is sent. It is intended to only be used once to remove a clear mistake, not as general session history editing.
 

@@ -48,6 +48,29 @@ test("removes an entry subtree and labels that target it", () => {
 	);
 });
 
+test("reparents surviving children through removed labels without mutating the original tree", () => {
+	const timestamp = "2026-01-01T00:00:00.000Z";
+	const entries: SessionEntry[] = [
+		{ type: "custom", id: "drop", parentId: null, timestamp, customType: "test" },
+		{ type: "custom", id: "keep", parentId: null, timestamp, customType: "test" },
+		{ type: "label", id: "label", parentId: "keep", timestamp, targetId: "drop", label: "mistake" },
+		{ type: "label", id: "label2", parentId: "label", timestamp, targetId: "drop", label: undefined },
+		{ type: "custom", id: "child", parentId: "label2", timestamp, customType: "test" },
+		{ type: "label", id: "root-label", parentId: null, timestamp, targetId: "drop", label: "mistake" },
+		{ type: "custom", id: "root-child", parentId: "root-label", timestamp, customType: "test" },
+	];
+	const original = structuredClone(entries);
+	assert.deepEqual(
+		removeEntrySubtree(entries, "drop").map(({ id, parentId }) => ({ id, parentId })),
+		[
+			{ id: "keep", parentId: null },
+			{ id: "child", parentId: "keep" },
+			{ id: "root-child", parentId: null },
+		],
+	);
+	assert.deepEqual(entries, original);
+});
+
 test("atomic session rewrites preserve file permissions", () => {
 	const sessionFile = createSessionFile("old\n");
 	chmodSync(sessionFile, 0o600);

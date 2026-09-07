@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.5
+
+Requires Pi 0.84.3 or newer.
+
+- Preserved the recovered conversation position across destructive session reloads, including branched and empty conversations.
+- Restored the recovered prompt in the replacement session's editor.
+- Repaired surviving parent links when deleting labels that refer to removed entries.
+- Unblocked recovery after failed or cancelled compaction.
+- Added command-lifecycle regression tests using Pi's navigation and session-file reader.
+
 ## 0.2.4
 
 - Updated typo correction to use Pi's effective provider and resolved authentication.
