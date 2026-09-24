@@ -18,6 +18,8 @@ dist/
 tmp/
 
 # Environment
+.devbox/
+.direnv/
 .env
 .env.*
 !.env.example
