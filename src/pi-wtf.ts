@@ -39,44 +39,47 @@ export function normalizeCommandWords(words: unknown): string[] {
 
 const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 type TypoFixConfig = { model?: string; thinking?: (typeof THINKING_LEVELS)[number] };
-type Config = { words: string[]; invalidConfigPath?: string; typoFix?: unknown };
+type TypoFixConfigResult = { ok: true; settings: TypoFixConfig } | { ok: false; error: string };
+type Config = { words: string[]; invalidConfigPath?: string; typoFix: TypoFixConfigResult };
 
-function parseTypoFix(value: unknown): TypoFixConfig | undefined {
-	// Defer config errors until a model correction is requested, so local recovery still works.
-	if (value instanceof Error) throw value;
-	if (value === undefined) return undefined;
+function parseTypoFix(value: unknown): TypoFixConfigResult {
+	if (value === undefined) return { ok: true, settings: {} };
 	if (value === null || typeof value !== "object" || Array.isArray(value)) {
-		throw new Error("typoFix must be an object");
+		return { ok: false, error: "typoFix must be an object" };
 	}
 	const { model, thinking } = value as Record<string, unknown>;
 	if (model !== undefined && (typeof model !== "string" || !/^[^/\s]+\/\S+$/.test(model))) {
-		throw new Error("typoFix.model must be provider/model-id");
+		return { ok: false, error: "typoFix.model must be provider/model-id" };
 	}
 	const thinkingLevel = THINKING_LEVELS.find((level) => level === thinking);
 	if (thinking !== undefined && thinkingLevel === undefined) {
-		throw new Error(`typoFix.thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+		return { ok: false, error: `typoFix.thinking must be one of: ${THINKING_LEVELS.join(", ")}` };
 	}
-	return { model, thinking: thinkingLevel };
+	return { ok: true, settings: { model, thinking: thinkingLevel } };
 }
 
 function loadConfig(): Config {
 	const configPath = join(getAgentDir(), CONFIG_FILE_NAME);
 	if (!existsSync(configPath)) {
-		return { words: [DEFAULT_COMMAND_WORD] };
+		return { words: [DEFAULT_COMMAND_WORD], typoFix: { ok: true, settings: {} } };
 	}
 
 	try {
-		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { words?: unknown; typoFix?: unknown };
+		const value: unknown = JSON.parse(readFileSync(configPath, "utf-8"));
+		if (value === null || typeof value !== "object" || Array.isArray(value)) {
+			throw new Error("Config must be an object");
+		}
+		const config = value as Record<string, unknown>;
 		const words = normalizeCommandWords(config.words);
 		return {
 			words: words.length > 0 ? words : [DEFAULT_COMMAND_WORD],
 			invalidConfigPath: config.words !== undefined && words.length === 0 ? configPath : undefined,
-			typoFix: config.typoFix,
+			typoFix: parseTypoFix(config.typoFix),
 		};
 	} catch {
 		return {
 			words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath,
-			typoFix: new Error(`Invalid config at ${configPath}`),
+			typoFix: { ok: false, error: `Invalid config at ${configPath}` },
 		};
 	}
 }
@@ -273,44 +276,23 @@ export function findClosestSlashCommand(commandName: string, commandNames: strin
 	return closestCommand;
 }
 
-async function offerSlashCommandTypoFix(
-	commandName: string,
+type TypoSuggestion = { text: string; title: string; appliedMessage: string };
+
+function suggestSlashCommandTypoFix(
 	originalPrompt: string,
 	pi: ExtensionAPI,
-	ctx: ExtensionCommandContext,
-): Promise<boolean> {
+): TypoSuggestion | undefined {
 	const parsed = parseSlashCommandPrompt(originalPrompt);
-	if (!parsed) {
-		return false;
-	}
+	if (!parsed) return undefined;
 
 	const closestCommand = findClosestSlashCommand(parsed.commandName, getSlashCommandNames(pi));
-	if (!closestCommand) {
-		return false;
-	}
+	if (!closestCommand) return undefined;
 
-	const suggestion = `/${closestCommand}${parsed.rest}`;
-	const useSuggestion = await ctx.ui.confirm(
-		"Possible command typo detected:",
-		[
-			"Original:",
-			originalPrompt,
-			"",
-			"Suggested:",
-			suggestion,
-			"",
-			"Choose Yes to replace the restored prompt, or No to keep the original.",
-		].join("\n"),
-	);
-
-	if (useSuggestion) {
-		ctx.ui.setEditorText(suggestion);
-		ctx.ui.notify(`${commandName}: changed /${parsed.commandName} to /${closestCommand}`, "info");
-	} else {
-		ctx.ui.notify(`${commandName}: kept original prompt`, "info");
-	}
-
-	return true;
+	return {
+		text: `/${closestCommand}${parsed.rest}`,
+		title: "Possible command typo detected:",
+		appliedMessage: `changed /${parsed.commandName} to /${closestCommand}`,
+	};
 }
 
 const TYPO_FIX_SYSTEM_PROMPT = [
@@ -356,42 +338,47 @@ function buildTypoFixUserPrompt(originalPrompt: string): string {
 	].join("\n");
 }
 
-async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandContext, typoFix: unknown): Promise<string | undefined> {
-	const settings = parseTypoFix(typoFix);
+async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandContext, settings: TypoFixConfig): Promise<string | undefined> {
 	let model = ctx.model;
-	if (settings?.model) {
+	if (settings.model) {
 		const separator = settings.model.indexOf("/");
 		model = ctx.modelRegistry.find(settings.model.slice(0, separator), settings.model.slice(separator + 1));
 	}
 	if (!model) {
-		throw new Error(settings?.model ? `Unknown typoFix.model: ${settings.model}` : "No model available for typo correction");
+		throw new Error(settings.model ? `Unknown typoFix.model: ${settings.model}` : "No model available for typo correction");
 	}
 
-	const thinking = settings?.thinking ?? "unspecified";
+	const thinking = settings.thinking ?? "unspecified";
 	const progress = `Checking typos: ${model.provider}/${model.id} · thinking: ${thinking} (requested)`;
 	ctx.ui.setStatus("pi-wtf", progress);
 	ctx.ui.setWidget("pi-wtf-typo", [progress]);
 
-	const response = await ctx.modelRegistry
-		.streamSimple(
-			model,
-			{
-				systemPrompt: TYPO_FIX_SYSTEM_PROMPT,
-				messages: [
-					{
-						role: "user",
-						content: buildTypoFixUserPrompt(originalPrompt),
-						timestamp: Date.now(),
-					},
-				],
-				tools: [TYPO_FIX_TOOL],
-			},
-			{
-				cacheRetention: "none",
-				reasoning: settings?.thinking === "off" ? undefined : settings?.thinking,
-			},
-		)
-		.result();
+	let response;
+	try {
+		response = await ctx.modelRegistry
+			.streamSimple(
+				model,
+				{
+					systemPrompt: TYPO_FIX_SYSTEM_PROMPT,
+					messages: [
+						{
+							role: "user",
+							content: buildTypoFixUserPrompt(originalPrompt),
+							timestamp: Date.now(),
+						},
+					],
+					tools: [TYPO_FIX_TOOL],
+				},
+				{
+					cacheRetention: "none",
+					reasoning: settings.thinking === "off" ? undefined : settings.thinking,
+				},
+			)
+			.result();
+	} finally {
+		ctx.ui.setStatus("pi-wtf", undefined);
+		ctx.ui.setWidget("pi-wtf-typo", undefined);
+	}
 
 	if (response.stopReason === "error" || response.stopReason === "aborted") {
 		const detail = response.errorMessage ? `: ${response.errorMessage}` : "";
@@ -418,47 +405,43 @@ async function offerTypoFix(
 	originalPrompt: string,
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
-	typoFix: unknown,
+	typoFix: TypoFixConfigResult,
 ): Promise<void> {
-	if (await offerSlashCommandTypoFix(commandName, originalPrompt, pi, ctx)) {
-		return;
-	}
-
 	try {
-		const suggestion = await suggestTypoFix(originalPrompt, ctx, typoFix);
-		if (suggestion === undefined) {
-			return;
-		}
-
-		if (suggestion === originalPrompt) {
-			ctx.ui.notify(`${commandName}: no obvious typo fix found`, "info");
-			return;
+		let suggestion = suggestSlashCommandTypoFix(originalPrompt, pi);
+		if (!suggestion) {
+			// Invalid model settings must not prevent local command correction.
+			if (!typoFix.ok) throw new Error(typoFix.error);
+			const text = await suggestTypoFix(originalPrompt, ctx, typoFix.settings);
+			if (text === undefined) return;
+			if (text === originalPrompt) {
+				ctx.ui.notify(`${commandName}: no obvious typo fix found`, "info");
+				return;
+			}
+			suggestion = { text, title: "Use typo-fixed prompt?", appliedMessage: "applied suggestion" };
 		}
 
 		const useSuggestion = await ctx.ui.confirm(
-			"Use typo-fixed prompt?",
+			suggestion.title,
 			[
 				"Original:",
 				originalPrompt,
 				"",
 				"Suggested:",
-				suggestion,
+				suggestion.text,
 				"",
 				"Choose Yes to replace the restored prompt, or No to keep the original.",
 			].join("\n"),
 		);
 
 		if (useSuggestion) {
-			ctx.ui.setEditorText(suggestion);
-			ctx.ui.notify(`${commandName}: applied suggestion`, "info");
+			ctx.ui.setEditorText(suggestion.text);
+			ctx.ui.notify(`${commandName}: ${suggestion.appliedMessage}`, "info");
 		} else {
 			ctx.ui.notify(`${commandName}: kept original prompt`, "info");
 		}
 	} catch (error) {
 		ctx.ui.notify(`${commandName} failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-	} finally {
-		ctx.ui.setStatus("pi-wtf", undefined);
-		ctx.ui.setWidget("pi-wtf-typo", undefined);
 	}
 }
 

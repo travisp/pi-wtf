@@ -34,8 +34,11 @@ for (const { position, answered } of [
 		if (answered) h.assistant();
 		const file = h.sm.getSessionFile()!;
 
+		const previousContext = h.ctx;
 		await h.run();
 
+		assert.notEqual(h.ctx, previousContext);
+		assert.throws(() => previousContext.ui.setEditorText("stale edit"), /Context is stale/);
 		assert.equal(h.editorText, "mistkae");
 		assert.equal(h.sm.getEntry(removedId), undefined);
 		assert.deepEqual(h.sm.getEntries().slice(0, survivors.length), survivors);

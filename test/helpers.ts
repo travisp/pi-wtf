@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,6 +29,7 @@ import piWtf from "../src/pi-wtf.ts";
 
 export async function createHarness(t: TestContext, options: {
 	config?: unknown;
+	configText?: string;
 	suggestion?: string;
 	stopReason?: "toolUse" | "error" | "aborted";
 } = {}) {
@@ -42,8 +44,8 @@ export async function createHarness(t: TestContext, options: {
 		rmSync(directory, { recursive: true, force: true });
 	});
 
-	if (options.config !== undefined) {
-		writeFileSync(join(directory, "wtf.json"), JSON.stringify(options.config));
+	if (options.configText !== undefined || options.config !== undefined) {
+		writeFileSync(join(directory, "wtf.json"), options.configText ?? JSON.stringify(options.config));
 	}
 
 	const model: Model<"openai-responses"> = {
@@ -134,51 +136,83 @@ export async function createHarness(t: TestContext, options: {
 	const emit = async (event: TestEvent) => handlers.get(event.type)!(event, ctx);
 	// Only the host UI/event adapter is mocked. Navigation and context rebuilding
 	// use real SDK sessions; no Pi private state or prototype methods are borrowed.
-	const ctx = {
-		get sessionManager() { return session.sessionManager; },
-		model,
-		modelRegistry: new ModelRegistry(modelRuntime),
-		ui: {
-			notify: (message: string) => notifications.push(message),
-			setEditorText: (text: string) => { editorText = text; },
-			confirm: async (title: string, message: string) => { confirmations.push(`${title}\n${message}`); return confirmResult; },
-			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
-			setWidget: (key: string, value: string[] | undefined) => {
-				widgets.set(key, value);
-				widgetUpdates.push(value);
+	type SwitchOptions = NonNullable<Parameters<ExtensionCommandContext["switchSession"]>[1]>;
+	type ReplacementContext = Parameters<NonNullable<SwitchOptions["withSession"]>>[0];
+	type HarnessContext = Pick<ExtensionCommandContext,
+		"sessionManager" | "model" | "modelRegistry" | "isIdle" | "hasPendingMessages" |
+		"abort" | "waitForIdle" | "navigateTree" | "switchSession"
+	> & { ui: Pick<ExtensionCommandContext["ui"], "notify" | "setEditorText" | "confirm" | "setStatus" | "setWidget"> };
+	const createContext = (boundSession: AgentSession): ExtensionCommandContext => {
+		const assertCurrent = () => assert.equal(boundSession, session, "Context is stale after session replacement");
+		return {
+			get sessionManager() { assertCurrent(); return boundSession.sessionManager; },
+			get model() { assertCurrent(); return boundSession.model; },
+			modelRegistry: new ModelRegistry(modelRuntime),
+			ui: {
+				notify: (message) => { assertCurrent(); notifications.push(message); },
+				setEditorText: (text) => { assertCurrent(); editorText = text; },
+				confirm: async (title, message) => {
+					assertCurrent();
+					assert.equal(statuses.get("pi-wtf"), undefined, "Request progress must clear before confirmation");
+					assert.equal(widgets.get("pi-wtf-typo"), undefined);
+					confirmations.push(`${title}\n${message}`);
+					return confirmResult;
+				},
+				setStatus: (key, value) => { assertCurrent(); statuses.set(key, value); },
+				setWidget: (key, value) => {
+					assertCurrent();
+					assert.ok(value === undefined || Array.isArray(value), "Harness supports text widgets only");
+					widgets.set(key, value);
+					widgetUpdates.push(value);
+				},
 			},
-		},
-		isIdle: () => true,
-		hasPendingMessages: () => false,
-		abort: () => { void session.abort(); },
-		waitForIdle: () => session.waitForIdle(),
-		async navigateTree(targetId: string) {
-			const oldLeafId = session.sessionManager.getLeafId();
-			const result = await session.navigateTree(targetId);
-			if (!result.cancelled && oldLeafId !== targetId) {
-				await emit({ type: "session_tree" });
-			}
-			return result;
-		},
-		async switchSession(file: string, { withSession }: { withSession: (ctx: ExtensionCommandContext) => Promise<void> }) {
-			session.dispose();
-			session = await openSession(SessionManager.open(file, directory));
-			editorText = "";
-			await emit({ type: "session_start", reason: "resume" });
-			await withSession(ctx);
-			return { cancelled: false };
-		},
-	} as unknown as ExtensionCommandContext;
+			isIdle: () => boundSession.isIdle,
+			hasPendingMessages: () => false,
+			abort: () => { void boundSession.abort(); },
+			waitForIdle: () => boundSession.waitForIdle(),
+			async navigateTree(targetId) {
+				assertCurrent();
+				const oldLeafId = boundSession.sessionManager.getLeafId();
+				const result = await boundSession.navigateTree(targetId);
+				if (!result.cancelled && oldLeafId !== targetId) {
+					await emit({ type: "session_tree" });
+				}
+				return result;
+			},
+			async switchSession(file, options) {
+				assertCurrent();
+				boundSession.dispose();
+				session = await openSession(SessionManager.open(file, directory));
+				ctx = createContext(session);
+				editorText = "";
+				await emit({ type: "session_start", reason: "resume" });
+				// The extension only uses the UI subset of the fresh replacement context.
+				await options?.withSession?.(ctx as ReplacementContext);
+				return { cancelled: false };
+			},
+		} satisfies HarnessContext as unknown as ExtensionCommandContext;
+	};
+	let ctx = createContext(session);
 
-	piWtf({
+	const api = {
 		registerCommand(name: string, command: RegisteredCommand) { commands.set(name, command); },
-		on(name: string, handler: EventHandler) { handlers.set(name, handler); },
+		on(name: string, handler: unknown) {
+			handlers.set(name, handler as EventHandler);
+			return () => { handlers.delete(name); };
+		},
 		appendEntry(customType: string) { session.sessionManager.appendCustomEntry(customType); },
-		getCommands: () => [...commands.keys()].map((name) => ({ name, source: "extension" })),
-	} as unknown as ExtensionAPI);
+		getCommands: () => [...commands.keys()].map((name) => ({
+			name, source: "extension" as const,
+			sourceInfo: { path: directory, source: "test", scope: "temporary" as const, origin: "top-level" as const },
+		})),
+	} satisfies Pick<ExtensionAPI, "registerCommand" | "on" | "appendEntry" | "getCommands">;
+	// Only implemented methods are checked above; unused host capabilities are intentionally absent.
+	piWtf(api as unknown as ExtensionAPI);
 
 	return {
-		ctx, emit, notifications, confirmations, statuses, widgets, widgetUpdates, requests,
+		get ctx() { return ctx; },
+		get session() { return session; },
+		emit, notifications, confirmations, statuses, widgets, widgetUpdates, requests,
 		get editorText() { return editorText; },
 		set editorText(value: string) { editorText = value; },
 		set confirmResult(value: boolean) { confirmResult = value; },

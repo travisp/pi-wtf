@@ -37,7 +37,8 @@ for (const accept of [true, false]) {
 for (const thinking of [undefined, "off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
 	test(`uses configured model and thinking=${thinking} without changing session`, async (t) => {
 		const h = await createHarness(t, { config: { typoFix: { model: "pi-wtf-test/other/model", thinking } } });
-		const sessionModel = h.ctx.model;
+		const sessionModel = h.session.model;
+		const sessionThinking = h.session.thinkingLevel;
 		await h.user("mistkae");
 		h.assistant();
 		await h.run("fuck?");
@@ -48,17 +49,23 @@ for (const thinking of [undefined, "off", "minimal", "low", "medium", "high", "x
 			[`Checking typos: pi-wtf-test/other/model · thinking: ${thinking ?? "unspecified"} (requested)`],
 			undefined,
 		]);
-		assert.equal(h.ctx.model, sessionModel);
+		assert.equal(h.session.model, sessionModel);
+		assert.equal(h.session.thinkingLevel, sessionThinking);
 		assert.equal(h.editorText, "mistake");
 	});
 }
 
-test("thinking-only configuration uses the session model", async (t) => {
+test("thinking-only configuration follows live session model without changing its thinking", async (t) => {
 	const h = await createHarness(t, { config: { typoFix: { thinking: "low" } } });
+	const selected = h.ctx.modelRegistry.find("pi-wtf-test", "other/model")!;
+	await h.session.setModel(selected);
+	h.session.setThinkingLevel("high");
 	await h.user("mistkae");
 	h.assistant();
 	await h.run("fuck?");
-	assert.equal(h.requests[0].model.id, h.ctx.model!.id);
+	assert.equal(h.requests[0].model.id, selected.id);
+	assert.equal(h.session.model, selected);
+	assert.equal(h.session.thinkingLevel, "high");
 	assert.equal((h.requests[0].options as { reasoning?: string }).reasoning, "low");
 });
 
@@ -90,14 +97,18 @@ for (const stopReason of ["error", "aborted"] as const) {
 }
 
 for (const [original, corrected] of [["/thinkng high", "/thinking high"], ["/bgu problem", "/bug problem"]]) {
-	test(`corrects ${original} locally without a model request`, async (t) => {
-		const h = await createHarness(t, { config: { typoFix: { thinking: "invalid" } } });
-		await h.user(original);
-		h.assistant();
-		await h.run("fuck?");
-		assert.equal(h.editorText, corrected);
-		assert.deepEqual(h.widgetUpdates, []);
-		assert.equal(h.requests.length, 0);
-		assert.equal(h.confirmations.length, 1);
-	});
+	for (const accept of [true, false]) {
+		test(`corrects ${original} locally without a model request; accept=${accept}`, async (t) => {
+			const h = await createHarness(t, { config: { typoFix: { thinking: "invalid" } } });
+			h.confirmResult = accept;
+			await h.user(original);
+			h.assistant();
+			await h.run("fuck?");
+			assert.equal(h.editorText, accept ? corrected : original);
+			assert.deepEqual(h.widgetUpdates, []);
+			assert.equal(h.requests.length, 0);
+			assert.equal(h.confirmations.length, 1);
+			assert.match(h.confirmations[0], /^Possible command typo detected:/);
+		});
+	}
 }
