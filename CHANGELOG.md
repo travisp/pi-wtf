@@ -1,9 +1,13 @@
 # Changelog
 
-## Unreleased
+## 0.3.0
 
 Requires Pi 0.87.1 or newer.
 
+- Added optional `typoFix.model` and `typoFix.thinking` settings in `~/.pi/agent/wtf.json`, without changing the session's model or thinking level.
+- Displayed the provider/model and requested thinking level during typo-correction requests.
+- Clarified typo-correction instructions and unified suggestion confirmation for local and model corrections.
+- Validated configuration at load time; invalid configuration blocks model requests while preserving prompt recovery and local slash-command correction.
 - Routed typo correction through Pi's model registry for transcript normalization and resolved authentication.
 - Fixed recovery of unanswered prompts, including the first prompt in a session.
 - Handled destructive recovery before Pi has written the session file, with rollback on failed or cancelled reloads.

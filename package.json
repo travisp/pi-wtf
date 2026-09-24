@@ -1,6 +1,6 @@
 {
   "name": "pi-wtf",
-  "version": "0.2.5",
+  "version": "0.3.0",
   "description": "Recover, rewind, or undo the last user prompt in pi after you realize you messed up.",
   "type": "module",
   "engines": {
