@@ -30,6 +30,43 @@ for (const accept of [true, false]) {
 	});
 }
 
+for (const thinking of [undefined, "off", "minimal", "low", "medium", "high", "xhigh", "max"]) {
+	test(`uses configured model and thinking=${thinking} without changing session`, async (t) => {
+		const h = await createHarness(t, { config: { typoFix: { model: "pi-wtf-test/other/model", thinking } } });
+		const sessionModel = h.ctx.model;
+		await h.user("mistkae");
+		h.assistant();
+		await h.run("fuck?");
+		assert.equal(h.requests.length, 1);
+		assert.equal(h.requests[0].model.id, "other/model");
+		assert.equal((h.requests[0].options as { reasoning?: string }).reasoning, thinking === "off" ? undefined : thinking);
+		assert.equal(h.ctx.model, sessionModel);
+		assert.equal(h.editorText, "mistake");
+	});
+}
+
+test("thinking-only configuration uses the session model", async (t) => {
+	const h = await createHarness(t, { config: { typoFix: { thinking: "low" } } });
+	await h.user("mistkae");
+	h.assistant();
+	await h.run("fuck?");
+	assert.equal(h.requests[0].model.id, h.ctx.model!.id);
+	assert.equal((h.requests[0].options as { reasoning?: string }).reasoning, "low");
+});
+
+for (const typoFix of [null, [], { model: "test" }, { model: 42 }, { thinking: "invalid" }, { model: "missing/model" }]) {
+	test(`invalid typo config ${JSON.stringify(typoFix)} preserves prompt without a request`, async (t) => {
+		const h = await createHarness(t, { config: { typoFix } });
+		await h.user("mistkae");
+		h.assistant();
+		await h.run("fuck?");
+		assert.equal(h.requests.length, 0);
+		assert.equal(h.editorText, "mistkae");
+		assert.match(h.notifications.at(-1)!, /failed:.*(?:config|typoFix)/);
+		assert.equal(h.statuses.get("pi-wtf"), undefined);
+	});
+}
+
 for (const stopReason of ["error", "aborted"] as const) {
 	test(`typo correction keeps the restored prompt on model ${stopReason}`, async (t) => {
 		const h = await createHarness(t, { stopReason });
@@ -46,7 +83,7 @@ for (const stopReason of ["error", "aborted"] as const) {
 
 for (const [original, corrected] of [["/thinkng high", "/thinking high"], ["/bgu problem", "/bug problem"]]) {
 	test(`corrects ${original} locally without a model request`, async (t) => {
-		const h = await createHarness(t);
+		const h = await createHarness(t, { config: { typoFix: { thinking: "invalid" } } });
 		await h.user(original);
 		h.assistant();
 		await h.run("fuck?");

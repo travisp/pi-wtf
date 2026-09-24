@@ -37,21 +37,47 @@ export function normalizeCommandWords(words: unknown): string[] {
 	return [...normalizedWords];
 }
 
-function loadConfiguredWords(): { words: string[]; invalidConfigPath?: string } {
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+type TypoFixConfig = { model?: string; thinking?: (typeof THINKING_LEVELS)[number] };
+type Config = { words: string[]; invalidConfigPath?: string; typoFix?: unknown };
+
+function parseTypoFix(value: unknown): TypoFixConfig | undefined {
+	// Defer config errors until a model correction is requested, so local recovery still works.
+	if (value instanceof Error) throw value;
+	if (value === undefined) return undefined;
+	if (value === null || typeof value !== "object" || Array.isArray(value)) {
+		throw new Error("typoFix must be an object");
+	}
+	const { model, thinking } = value as Record<string, unknown>;
+	if (model !== undefined && (typeof model !== "string" || !/^[^/\s]+\/\S+$/.test(model))) {
+		throw new Error("typoFix.model must be provider/model-id");
+	}
+	const thinkingLevel = THINKING_LEVELS.find((level) => level === thinking);
+	if (thinking !== undefined && thinkingLevel === undefined) {
+		throw new Error(`typoFix.thinking must be one of: ${THINKING_LEVELS.join(", ")}`);
+	}
+	return { model, thinking: thinkingLevel };
+}
+
+function loadConfig(): Config {
 	const configPath = join(getAgentDir(), CONFIG_FILE_NAME);
 	if (!existsSync(configPath)) {
 		return { words: [DEFAULT_COMMAND_WORD] };
 	}
 
 	try {
-		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { words?: unknown };
+		const config = JSON.parse(readFileSync(configPath, "utf-8")) as { words?: unknown; typoFix?: unknown };
 		const words = normalizeCommandWords(config.words);
-		if (words.length > 0) {
-			return { words };
-		}
-		return { words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath };
+		return {
+			words: words.length > 0 ? words : [DEFAULT_COMMAND_WORD],
+			invalidConfigPath: config.words !== undefined && words.length === 0 ? configPath : undefined,
+			typoFix: config.typoFix,
+		};
 	} catch {
-		return { words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath };
+		return {
+			words: [DEFAULT_COMMAND_WORD], invalidConfigPath: configPath,
+			typoFix: new Error(`Invalid config at ${configPath}`),
+		};
 	}
 }
 
@@ -325,11 +351,15 @@ function buildTypoFixUserPrompt(originalPrompt: string): string {
 	].join("\n");
 }
 
-async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandContext): Promise<string | undefined> {
-	const model = ctx.model;
+async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandContext, typoFix: unknown): Promise<string | undefined> {
+	const settings = parseTypoFix(typoFix);
+	let model = ctx.model;
+	if (settings?.model) {
+		const separator = settings.model.indexOf("/");
+		model = ctx.modelRegistry.find(settings.model.slice(0, separator), settings.model.slice(separator + 1));
+	}
 	if (!model) {
-		ctx.ui.notify("No model available for typo correction", "warning");
-		return undefined;
+		throw new Error(settings?.model ? `Unknown typoFix.model: ${settings.model}` : "No model available for typo correction");
 	}
 
 	const response = await ctx.modelRegistry
@@ -348,6 +378,7 @@ async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandConte
 			},
 			{
 				cacheRetention: "none",
+				reasoning: settings?.thinking === "off" ? undefined : settings?.thinking,
 			},
 		)
 		.result();
@@ -377,6 +408,7 @@ async function offerTypoFix(
 	originalPrompt: string,
 	pi: ExtensionAPI,
 	ctx: ExtensionCommandContext,
+	typoFix: unknown,
 ): Promise<void> {
 	if (await offerSlashCommandTypoFix(commandName, originalPrompt, pi, ctx)) {
 		return;
@@ -385,7 +417,7 @@ async function offerTypoFix(
 	ctx.ui.setStatus("pi-wtf", "Checking prompt for typos...");
 	ctx.ui.setWidget("pi-wtf-typo", ["pi-wtf: checking restored prompt for typos..."]);
 	try {
-		const suggestion = await suggestTypoFix(originalPrompt, ctx);
+		const suggestion = await suggestTypoFix(originalPrompt, ctx, typoFix);
 		if (suggestion === undefined) {
 			return;
 		}
@@ -423,7 +455,7 @@ async function offerTypoFix(
 }
 
 export default function piWtf(pi: ExtensionAPI) {
-	const config = loadConfiguredWords();
+	const config = loadConfig();
 	let isCompacting = false;
 	let isDestructiveCommandActive = false;
 
@@ -596,7 +628,7 @@ export default function piWtf(pi: ExtensionAPI) {
 
 				const originalPrompt = await recoverLastPrompt(typoCommandName, ctx);
 				if (originalPrompt !== undefined) {
-					await offerTypoFix(typoCommandName, originalPrompt, pi, ctx);
+					await offerTypoFix(typoCommandName, originalPrompt, pi, ctx, config.typoFix);
 				}
 			},
 		});

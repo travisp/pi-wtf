@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { TestContext } from "node:test";
@@ -27,6 +27,7 @@ import {
 import piWtf from "../src/pi-wtf.ts";
 
 export async function createHarness(t: TestContext, options: {
+	config?: unknown;
 	suggestion?: string;
 	stopReason?: "toolUse" | "error" | "aborted";
 } = {}) {
@@ -40,6 +41,10 @@ export async function createHarness(t: TestContext, options: {
 		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
 		rmSync(directory, { recursive: true, force: true });
 	});
+
+	if (options.config !== undefined) {
+		writeFileSync(join(directory, "wtf.json"), JSON.stringify(options.config));
+	}
 
 	const model: Model<"openai-responses"> = {
 		id: "test",
@@ -92,7 +97,7 @@ export async function createHarness(t: TestContext, options: {
 		allowModelNetwork: false,
 	});
 	modelRuntime.registerNativeProvider({
-		id: model.provider, name: "Test", getModels: () => [model],
+		id: model.provider, name: "Test", getModels: () => [model, { ...model, id: "other/model", reasoning: true }],
 		auth: { apiKey: {
 			name: "Test auth",
 			resolve: async () => ({

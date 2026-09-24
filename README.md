@@ -4,7 +4,7 @@ A small [pi](https://github.com/earendil-works/pi) extension for the moment you 
 
 `/fuck` aborts the current run if needed, rewinds to before the most recent user prompt on the active branch, and restores that prompt into the editor so you can fix it and resubmit.
 
-`/fuck?` does the same recovery, then suggests a conservative typo-only correction and lets you choose whether to use it. Note that this uses your currently configured model.
+`/fuck?` does the same recovery, then suggests a conservative typo-only correction and lets you choose whether to use it. By default this uses your current model; you can override the model and thinking level below.
 
 `/fuck!` destructively rewrites the current session file to remove the most recent user prompt and everything below it, then reloads that same session and restores the prompt into the editor. Note: use this at your own risk! In particular, if you for some reason have the same session file open in multiple processes, the effects may be unpredictable.
 
@@ -55,7 +55,7 @@ For an unanswered prompt at the current tree position, recovery first appends a 
 
 Runs the same recovery as `/fuck`, but then checks for typos:
 - checks for /command typos directly
-- checks for typos by asking the current model
+- checks for typos by asking the configured typo-fix model (the current model by default)
 
 If found, it shows the suggestion and asks if the user wants to use the suggestion instead.
 
@@ -93,6 +93,25 @@ After restarting or running `/reload`, the registered commands become:
 
 If the config file is missing, invalid, or contains no valid words, pi-wtf falls back to `fuck`.
 
+### Typo-fix model and thinking
+
+Optionally configure `/fuck?` in the same `~/.pi/agent/wtf.json` file:
+
+```json
+{
+  "typoFix": {
+    "model": "anthropic/claude-haiku-4-5",
+    "thinking": "off"
+  }
+}
+```
+
+Both fields are optional. Omit `model` to use the current session model. Use an exact `provider/model-id` from Pi's model registry; model IDs may contain slashes. Credentials come from Pi as usual.
+
+`thinking` accepts `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Omitted thinking sends no explicit reasoning level, just like `off`; the provider determines supported behavior. These settings affect only the typo-fix request, never the session's model or thinking level.
+
+Restart or run `/reload` after editing. Invalid typo-fix settings or an unknown model report an error and keep the restored prompt, without silently choosing another model. Slash-command typo corrections remain local and do not use these settings. You can omit `words` to keep `/fuck`, `/fuck?`, and `/fuck!`.
+
 Recommended alternatives if you work in a joyless environment that doesn't understand humor: oops, doh, ffs.
 
 You can always ask pi to read the README and change the setting itself.
@@ -104,7 +123,7 @@ You can always ask pi to read the README and change the setting itself.
 - It does **not** restore prompts with image attachments; use `/tree` for those prompts
 - It does **not** work when queued messages exist
 - It does **not** work when compaction is running
-- The typo command requires the current model to support tool calling and have usable credentials
+- The typo command requires the selected typo-fix model to support tool calling and have usable credentials
 - The destructive command only works immediately during or after a real user prompt; succeeding or navigating the tree makes it unavailable until another prompt is sent
 - The destructive command is **destructive** and rewrites the current session file in place
 
