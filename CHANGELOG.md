@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+Requires Pi 0.87.1 or newer.
+
+- Routed typo correction through Pi's model registry for transcript normalization and resolved authentication.
+- Fixed recovery of unanswered prompts, including the first prompt in a session.
+- Handled destructive recovery before Pi has written the session file, with rollback on failed or cancelled reloads.
+- Added `/thinking` and `/bug` to local slash-command typo correction.
+- Replaced private-method navigation mocks with public SDK session tests and added model-call regression coverage.
+- Added TypeScript checking and CI against locked and latest Pi releases.
+
 ## 0.2.5
 
 Requires Pi 0.84.3 or newer.

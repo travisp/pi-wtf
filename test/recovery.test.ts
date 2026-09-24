@@ -1,133 +1,87 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import test, { type TestContext } from "node:test";
+import { readFileSync } from "node:fs";
+import test from "node:test";
 
-import {
-	AgentSession,
-	SessionManager,
-	type ExtensionAPI,
-	type ExtensionCommandContext,
-	type ExtensionEvent,
-	type RegisteredCommand,
-} from "@earendil-works/pi-coding-agent";
-import piWtf from "../src/pi-wtf.ts";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { createHarness } from "./helpers.ts";
 
-function createHarness(t: TestContext) {
-	const directory = mkdtempSync(join(tmpdir(), "pi-wtf-recovery-"));
-	const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
-	process.env.PI_CODING_AGENT_DIR = directory;
-	t.after(() => {
-		if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
-		else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
-		rmSync(directory, { recursive: true, force: true });
-	});
-
-	let sessionManager = SessionManager.create(directory, directory);
-	let editorText = "";
-	const notifications: string[] = [];
-	const commands = new Map<string, RegisteredCommand>();
-	type TestEvent = Partial<ExtensionEvent> & { type: ExtensionEvent["type"] };
-	type EventHandler = (event: TestEvent, ctx: ExtensionCommandContext) => unknown;
-	const handlers = new Map<string, EventHandler>();
-	const emit = async (event: TestEvent) => handlers.get(event.type)!(event, ctx);
-	const ctx = {
-		get sessionManager() { return sessionManager; },
-		ui: {
-			notify: (message: string) => notifications.push(message),
-			setEditorText: (text: string) => { editorText = text; },
-		},
-		isIdle: () => true,
-		hasPendingMessages: () => false,
-		async navigateTree(targetId: string) {
-			// Exercise Pi's real navigation without starting a model or terminal UI.
-			const result = await AgentSession.prototype.navigateTree.call({
-				isStreaming: false,
-				sessionManager,
-				agent: { state: { messages: [] } },
-				_extensionRunner: { hasHandlers: () => false, emit },
-				_resolveIdleWaitIfIdle: () => {},
-			} as unknown as AgentSession, targetId);
-			if (result.editorText) editorText = result.editorText;
-			return result;
-		},
-		async switchSession(file: string, { withSession }: { withSession: (ctx: ExtensionCommandContext) => Promise<void> }) {
-			sessionManager = SessionManager.open(file, directory);
-			editorText = "";
-			await emit({ type: "session_start", reason: "resume" });
-			await withSession(ctx);
-			return { cancelled: false };
-		},
-	} as unknown as ExtensionCommandContext;
-
-	piWtf({
-		registerCommand(name: string, command: RegisteredCommand) { commands.set(name, command); },
-		on(name: string, handler: EventHandler) { handlers.set(name, handler); },
-	} as unknown as ExtensionAPI);
-
-	return {
-		ctx,
-		emit,
-		notifications,
-		get editorText() { return editorText; },
-		get sm() { return sessionManager; },
-		async user(text: string) {
-			const message = { role: "user" as const, content: text, timestamp: Date.now() };
-			const id = sessionManager.appendMessage(message);
-			await emit({ type: "message_start", message });
-			return id;
-		},
-		assistant() {
-			return sessionManager.appendMessage({
-				role: "assistant", content: [{ type: "text", text: "reply" }],
-				api: "openai-responses", provider: "openai", model: "test", stopReason: "stop",
-				timestamp: Date.now(),
-				usage: {
-					input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-			});
-		},
-		run: () => commands.get("fuck!")!.handler("", ctx),
-	};
-}
-
-for (const position of ["linear", "branch", "root", "root with sibling", "unanswered"] as const) {
-	test(`destructive recovery preserves context after reload: ${position}`, async (t) => {
-		const h = createHarness(t);
-		let parentId: string | null = null;
+for (const { position, answered } of [
+	{ position: "linear", answered: true },
+	{ position: "branch", answered: true },
+	{ position: "root", answered: true },
+	{ position: "root with sibling", answered: true },
+	{ position: "linear", answered: false },
+	{ position: "root", answered: false },
+] as const) {
+	test(`destructive recovery preserves context after reload: ${position}, answered=${answered}`, async (t) => {
+		const h = await createHarness(t);
 		if (position !== "root") {
 			await h.user("original");
-			parentId = h.assistant();
+			const originalLeaf = h.assistant();
+			if (position === "branch") {
+				await h.user("other branch");
+				h.assistant();
+				h.sm.branch(originalLeaf);
+			}
 		}
-		if (position === "branch") {
-			await h.user("other branch");
-			h.assistant();
-			h.sm.branch(parentId!);
-		}
-		if (position === "root with sibling") {
+		if (position === "root" || position === "root with sibling") {
 			h.sm.resetLeaf();
-			parentId = null;
 		}
+		const parentId = h.sm.getLeafId();
 		const expectedContext = h.sm.buildSessionContext().messages;
 		const survivors = h.sm.getEntries();
 		const removedId = await h.user("mistkae");
-		if (position !== "unanswered") h.assistant();
+		if (answered) h.assistant();
 		const file = h.sm.getSessionFile()!;
 
 		await h.run();
 
 		assert.equal(h.editorText, "mistkae");
 		assert.equal(h.sm.getEntry(removedId), undefined);
-		assert.deepEqual(h.sm.getEntries().slice(0, -1), survivors);
-		assert.equal(h.sm.getLeafEntry()!.parentId, parentId);
+		assert.deepEqual(h.sm.getEntries().slice(0, survivors.length), survivors);
+		// Resuming an empty context can append model/thinking metadata after the anchor.
+		const anchor = h.sm.getBranch().find((entry) => entry.type === "custom" && entry.customType === "pi-wtf-recovery");
+		assert.ok(anchor);
+		assert.equal(anchor.parentId, parentId);
 		assert.deepEqual(h.sm.buildSessionContext().messages, expectedContext);
+		assert.deepEqual(h.messages, expectedContext);
 		// The selected branch must survive another process opening the same file.
 		assert.deepEqual(SessionManager.open(file).buildSessionContext().messages, expectedContext);
 		await h.run();
 		assert.match(h.notifications.at(-1)!, /only works immediately/);
 	});
+}
+
+for (const command of ["fuck", "fuck?"] as const) {
+	for (const { root, answered } of [
+		{ root: false, answered: true },
+		{ root: false, answered: false },
+		{ root: true, answered: false },
+	]) {
+		test(`/${command} restores the prompt and rewinds context: root=${root}, answered=${answered}`, async (t) => {
+			const h = await createHarness(t, { suggestion: "mistkae" });
+			if (root) h.sm.resetLeaf();
+			else {
+				await h.user("original");
+				h.assistant();
+			}
+			const parentId = h.sm.getLeafId();
+			const expectedContext = h.sm.buildSessionContext().messages;
+			const userId = await h.user("mistkae");
+			if (answered) h.assistant();
+			h.editorText = "existing draft";
+
+			await h.run(command);
+
+			assert.equal(h.editorText, "mistkae");
+			assert.equal(h.sm.getLeafId(), parentId);
+			assert.deepEqual(h.sm.buildSessionContext().messages, expectedContext);
+			assert.deepEqual(h.messages, expectedContext);
+			assert.ok(h.sm.getEntry(userId), "non-destructive recovery retains raw history");
+			await h.run();
+			assert.match(h.notifications.at(-1)!, /only works immediately/);
+		});
+	}
 }
 
 for (const [outcome, event] of [
@@ -136,7 +90,7 @@ for (const [outcome, event] of [
 	["abort", { type: "session_compact_failed", aborted: true }],
 ] as const) {
 	test(`recovery is available after compaction ${outcome}`, async (t) => {
-		const h = createHarness(t);
+		const h = await createHarness(t);
 		await h.user("mistake");
 		h.assistant();
 		await h.emit({ type: "session_before_compact" });
@@ -151,7 +105,7 @@ for (const [outcome, event] of [
 
 for (const outcome of ["cancel", "throw"] as const) {
 	test(`destructive recovery restores the session file when reload ${outcome}s`, async (t) => {
-		const h = createHarness(t);
+		const h = await createHarness(t);
 		await h.user("mistake");
 		h.assistant();
 		const file = h.sm.getSessionFile()!;
@@ -167,7 +121,7 @@ for (const outcome of ["cancel", "throw"] as const) {
 }
 
 test("cancelled navigation leaves the session file untouched", async (t) => {
-	const h = createHarness(t);
+	const h = await createHarness(t);
 	await h.user("mistake");
 	h.assistant();
 	const file = h.sm.getSessionFile()!;
@@ -175,4 +129,69 @@ test("cancelled navigation leaves the session file untouched", async (t) => {
 	t.mock.method(h.ctx, "navigateTree", async () => ({ cancelled: true }));
 	await h.run();
 	assert.equal(readFileSync(file, "utf8"), original);
+});
+
+for (const command of ["fuck", "fuck?", "fuck!"] as const) {
+	test(`/${command} respects cancelled navigation from an unanswered root prompt`, async (t) => {
+		const h = await createHarness(t);
+		h.sm.resetLeaf();
+		const userId = await h.user("mistkae");
+		const expectedContext = h.sm.buildSessionContext().messages;
+		t.mock.method(h.ctx, "navigateTree", async (targetId: string) => {
+			assert.equal(targetId, userId);
+			assert.notEqual(h.sm.getLeafId(), userId, "marker makes navigation actionable");
+			return { cancelled: true };
+		});
+		await h.run(command);
+		assert.ok(h.sm.getEntry(userId));
+		assert.deepEqual(h.sm.buildSessionContext().messages, expectedContext);
+		assert.equal(h.editorText, "");
+		assert.equal(h.requests.length, 0);
+		assert.match(h.notifications.at(-1)!, /Recovery cancelled/);
+	});
+
+	test(`/${command} rejects queued messages without changing history`, async (t) => {
+		const h = await createHarness(t);
+		await h.user("mistake");
+		const entries = h.sm.getEntries();
+		t.mock.method(h.ctx, "hasPendingMessages", () => true);
+		await h.run(command);
+		assert.deepEqual(h.sm.getEntries(), entries);
+		assert.equal(h.editorText, "");
+		assert.match(h.notifications.at(-1)!, /queued messages/);
+	});
+}
+
+test("recovery aborts and waits for active work before navigating", async (t) => {
+	const h = await createHarness(t);
+	await h.user("mistake");
+	h.assistant();
+	const calls: string[] = [];
+	t.mock.method(h.ctx, "isIdle", () => false);
+	t.mock.method(h.ctx, "abort", () => { calls.push("abort"); });
+	t.mock.method(h.ctx, "waitForIdle", async () => { calls.push("idle"); });
+	const navigate = h.ctx.navigateTree;
+	t.mock.method(h.ctx, "navigateTree", async (id: string) => {
+		assert.deepEqual(calls, ["abort", "idle"]);
+		return navigate(id);
+	});
+	await h.run("fuck");
+	assert.equal(h.editorText, "mistake");
+});
+
+test("destructive recovery preserves compacted and edited context across reload", async (t) => {
+	const h = await createHarness(t);
+	h.sm.appendMessage({ role: "system", content: "Keep instructions", toolsAdded: [], timestamp: Date.now() });
+	await h.user("summarized history");
+	h.assistant();
+	const kept = await h.user("retained prompt");
+	h.assistant();
+	h.sm.appendCompaction("Earlier work", kept, 100);
+	h.sm.appendContextEdit(kept, { content: "corrected retained prompt" });
+	const expected = h.sm.buildSessionContext().messages;
+	await h.user("mistkae");
+	h.assistant();
+	await h.run();
+	assert.deepEqual(h.messages, expected);
+	assert.deepEqual(SessionManager.open(h.sm.getSessionFile()!).buildSessionContext().messages, expected);
 });

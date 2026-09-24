@@ -12,7 +12,7 @@ _Inspired by the great [thefuck](https://github.com/nvbn/thefuck)._
 
 ## Install
 
-Requires Pi 0.84.3 or newer.
+Requires Pi 0.87.1 or newer.
 
 Install from npm:
 
@@ -48,6 +48,8 @@ Inside pi:
 2. Finds the most recent real user message on the active branch
 3. Rewinds to just before that prompt
 4. Restores the prompt into the editor
+
+For an unanswered prompt at the current tree position, recovery first appends a non-message navigation marker. This lets Pi rewind even the first prompt; the marker adds no model context. If navigation is cancelled, the prompt and its context are kept.
 
 **What `/fuck?` does:**
 
@@ -120,10 +122,11 @@ You can always ask pi to read the README and change the setting itself.
 Use the Devbox environment, then run the checks:
 
 ```bash
-devbox shell
-npm install
-npm run check
+devbox run -- npm ci --ignore-scripts
+devbox run -- npm run check
 ```
+
+`check` runs TypeScript checking, offline tests against Pi's public session and model APIs, and a package dry-run. CI checks both the locked Pi version and the latest release, including a weekly compatibility run. Tests use an isolated mock provider; no real model credentials or requests are needed.
 
 ## License
 

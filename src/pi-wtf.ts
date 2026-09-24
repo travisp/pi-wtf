@@ -59,10 +59,6 @@ function isUserMessageEntry(entry: SessionEntry): entry is UserMessageEntry {
 	return entry.type === "message" && entry.message.role === "user";
 }
 
-function getLastUserMessage(entries: SessionEntry[]): UserMessageEntry | undefined {
-	return entries.findLast(isUserMessageEntry);
-}
-
 function extractUserMessageText(entry: UserMessageEntry): string {
 	const { content } = entry.message;
 	return typeof content === "string"
@@ -128,7 +124,8 @@ function serializeSession(header: SessionHeader, entries: SessionEntry[]): strin
 
 export function rewriteSessionInPlace(sessionFile: string, content: string): void {
 	const tempFile = join(dirname(sessionFile), `.pi-wtf-${randomUUID()}.tmp`);
-	const mode = statSync(sessionFile).mode;
+	// Pi may not have flushed a new session before its first assistant reply.
+	const mode = existsSync(sessionFile) ? statSync(sessionFile).mode : 0o600;
 
 	try {
 		writeFileSync(tempFile, content, { mode });
@@ -143,7 +140,7 @@ export async function rewriteSessionForReplacement(
 	content: string,
 	replaceSession: () => Promise<{ cancelled: boolean }>,
 ): Promise<boolean> {
-	const originalContent = readFileSync(sessionFile, "utf-8");
+	const originalContent = existsSync(sessionFile) ? readFileSync(sessionFile, "utf-8") : undefined;
 	rewriteSessionInPlace(sessionFile, content);
 
 	let replaced = false;
@@ -152,7 +149,11 @@ export async function rewriteSessionForReplacement(
 		return replaced;
 	} finally {
 		if (!replaced) {
-			rewriteSessionInPlace(sessionFile, originalContent);
+			if (originalContent === undefined) {
+				rmSync(sessionFile, { force: true });
+			} else {
+				rewriteSessionInPlace(sessionFile, originalContent);
+			}
 		}
 	}
 }
@@ -162,10 +163,12 @@ export async function rewriteSessionForReplacement(
 const BUILTIN_SLASH_COMMANDS = [
 	"settings",
 	"model",
+	"thinking",
 	"scoped-models",
 	"export",
 	"import",
 	"share",
+	"bug",
 	"copy",
 	"name",
 	"session",
@@ -329,40 +332,30 @@ async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandConte
 		return undefined;
 	}
 
-	const provider = ctx.modelRegistry.getProvider(model.provider);
-	if (!provider) {
-		ctx.ui.notify(`No provider available for ${model.provider}`, "warning");
-		return undefined;
-	}
-
-	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-	if (!auth.ok) {
-		ctx.ui.notify(auth.error, "warning");
-		return undefined;
-	}
-
-	const response = await provider
-		.stream(
+	const response = await ctx.modelRegistry
+		.streamSimple(
 			model,
 			{
 				systemPrompt: TYPO_FIX_SYSTEM_PROMPT,
 				messages: [
 					{
-						role: "user" as const,
-						content: [{ type: "text" as const, text: buildTypoFixUserPrompt(originalPrompt) }],
+						role: "user",
+						content: buildTypoFixUserPrompt(originalPrompt),
 						timestamp: Date.now(),
 					},
 				],
 				tools: [TYPO_FIX_TOOL],
 			},
 			{
-				apiKey: auth.apiKey,
-				headers: auth.headers,
-				env: auth.env,
 				cacheRetention: "none",
 			},
 		)
 		.result();
+
+	if (response.stopReason === "error" || response.stopReason === "aborted") {
+		const detail = response.errorMessage ? `: ${response.errorMessage}` : "";
+		throw new Error(`Typo correction ${response.stopReason}${detail}`);
+	}
 
 	for (const content of response.content) {
 		if (content.type !== "toolCall" || content.name !== "prompt_typo_fixed") {
@@ -431,7 +424,6 @@ async function offerTypoFix(
 
 export default function piWtf(pi: ExtensionAPI) {
 	const config = loadConfiguredWords();
-	const commandWords = config.words;
 	let isCompacting = false;
 	let isDestructiveCommandActive = false;
 
@@ -443,18 +435,13 @@ export default function piWtf(pi: ExtensionAPI) {
 		isDestructiveCommandActive = false;
 	};
 
-	const resetSessionState = () => {
-		clearCompactionState();
-		clearDestructiveCommandActivation();
-	};
-
-	const prepareCommand = async (commandName: string, ctx: ExtensionCommandContext) => {
+	const prepareRecovery = async (commandName: string, ctx: ExtensionCommandContext) => {
 		if (isCompacting) {
 			ctx.ui.notify(
 				`Can't /${commandName} during compaction. Press Esc to cancel compaction, then run /${commandName} again.`,
 				"warning",
 			);
-			return false;
+			return undefined;
 		}
 
 		if (ctx.hasPendingMessages()) {
@@ -462,7 +449,7 @@ export default function piWtf(pi: ExtensionAPI) {
 				`Can't /${commandName} while queued messages exist. Restore or send them first.`,
 				"warning",
 			);
-			return false;
+			return undefined;
 		}
 
 		if (!ctx.isIdle()) {
@@ -470,7 +457,21 @@ export default function piWtf(pi: ExtensionAPI) {
 			await ctx.waitForIdle();
 		}
 
-		return true;
+		const entry = ctx.sessionManager.getBranch().findLast(isUserMessageEntry);
+		if (!entry) {
+			ctx.ui.notify("Nothing to recover on this branch. Use /tree for manual navigation.", "info");
+			return undefined;
+		}
+
+		if (hasImageAttachments(entry)) {
+			ctx.ui.notify(
+				`Can't /${commandName}: prompts with image attachments can't be restored. Use /tree for manual navigation.`,
+				"warning",
+			);
+			return undefined;
+		}
+
+		return entry;
 	};
 
 	const rejectUnexpectedArgs = (commandName: string, args: string, ctx: ExtensionCommandContext) => {
@@ -482,33 +483,34 @@ export default function piWtf(pi: ExtensionAPI) {
 		return true;
 	};
 
-	const recoverLastPrompt = async (commandName: string, ctx: ExtensionCommandContext) => {
-		if (!(await prepareCommand(commandName, ctx))) {
-			return undefined;
+	const restorePrompt = async (entry: UserMessageEntry, ctx: ExtensionCommandContext) => {
+		// Pi treats navigation to the current leaf as a no-op. Move the leaf past
+		// an unanswered prompt with metadata that adds no model context, so normal
+		// navigation (including cancellation hooks) can rewind even a root prompt.
+		if (ctx.sessionManager.getLeafId() === entry.id) {
+			pi.appendEntry("pi-wtf-navigation");
 		}
 
-		const lastUserMessage = getLastUserMessage(ctx.sessionManager.getBranch());
-		if (!lastUserMessage) {
-			ctx.ui.notify("Nothing to recover on this branch. Use /tree for manual navigation.", "info");
-			return undefined;
-		}
-
-		if (hasImageAttachments(lastUserMessage)) {
-			ctx.ui.notify(
-				`Can't /${commandName}: prompts with image attachments can't be restored. Use /tree for manual navigation.`,
-				"warning",
-			);
-			return undefined;
-		}
-
-		const originalPrompt = extractUserMessageText(lastUserMessage);
-		const result = await ctx.navigateTree(lastUserMessage.id);
-		if (result.cancelled) {
+		if ((await ctx.navigateTree(entry.id)).cancelled) {
 			ctx.ui.notify("Recovery cancelled.", "info");
 			return undefined;
 		}
 
-		ctx.ui.notify(`${commandName}: navigated back to last prompt`, "info");
+		const originalPrompt = extractUserMessageText(entry);
+		ctx.ui.setEditorText(originalPrompt);
+		return originalPrompt;
+	};
+
+	const recoverLastPrompt = async (commandName: string, ctx: ExtensionCommandContext) => {
+		const entry = await prepareRecovery(commandName, ctx);
+		if (!entry) {
+			return undefined;
+		}
+
+		const originalPrompt = await restorePrompt(entry, ctx);
+		if (originalPrompt !== undefined) {
+			ctx.ui.notify(`${commandName}: navigated back to last prompt`, "info");
+		}
 		return originalPrompt;
 	};
 
@@ -521,21 +523,8 @@ export default function piWtf(pi: ExtensionAPI) {
 			return;
 		}
 
-		if (!(await prepareCommand(commandName, ctx))) {
-			return;
-		}
-
-		const lastUserMessage = getLastUserMessage(ctx.sessionManager.getBranch());
-		if (!lastUserMessage) {
-			ctx.ui.notify("Nothing to remove on this branch.", "info");
-			return;
-		}
-
-		if (hasImageAttachments(lastUserMessage)) {
-			ctx.ui.notify(
-				`Can't /${commandName}: prompts with image attachments can't be restored. Use /tree for manual navigation.`,
-				"warning",
-			);
+		const entry = await prepareRecovery(commandName, ctx);
+		if (!entry) {
 			return;
 		}
 
@@ -547,12 +536,10 @@ export default function piWtf(pi: ExtensionAPI) {
 		}
 
 		// Restore the prompt into the editor first, then delete that prompt's subtree from disk.
-		if ((await ctx.navigateTree(lastUserMessage.id)).cancelled) {
-			ctx.ui.notify("Recovery cancelled.", "info");
+		const originalPrompt = await restorePrompt(entry, ctx);
+		if (originalPrompt === undefined) {
 			return;
 		}
-
-		const originalPrompt = extractUserMessageText(lastUserMessage);
 		// Pi resumes at the last entry in the file. A non-message anchor preserves
 		// the recovered position, even at the root or beside a surviving branch.
 		const entries: SessionEntry[] = [
@@ -560,12 +547,12 @@ export default function piWtf(pi: ExtensionAPI) {
 			{
 				type: "custom",
 				id: randomUUID(),
-				parentId: lastUserMessage.parentId,
+				parentId: entry.parentId,
 				timestamp: new Date().toISOString(),
 				customType: "pi-wtf-recovery",
 			},
 		];
-		const rewrittenSession = serializeSession(sessionHeader, removeEntrySubtree(entries, lastUserMessage.id));
+		const rewrittenSession = serializeSession(sessionHeader, removeEntrySubtree(entries, entry.id));
 		const replaced = await rewriteSessionForReplacement(sessionFile, rewrittenSession, () =>
 			ctx.switchSession(sessionFile, {
 				withSession: async (replacementCtx) => {
@@ -628,7 +615,8 @@ export default function piWtf(pi: ExtensionAPI) {
 	};
 
 	pi.on("session_start", (_event, ctx) => {
-		resetSessionState();
+		clearCompactionState();
+		clearDestructiveCommandActivation();
 		if (config.invalidConfigPath) {
 			// /reload reports its own status after extensions restart, so defer this
 			// notification until the reload flow has finished updating the UI.
@@ -653,7 +641,7 @@ export default function piWtf(pi: ExtensionAPI) {
 	pi.on("session_compact", clearCompactionState);
 	pi.on("session_compact_failed", clearCompactionState);
 
-	for (const commandWord of commandWords) {
+	for (const commandWord of config.words) {
 		registerCommandSet(commandWord);
 	}
 }

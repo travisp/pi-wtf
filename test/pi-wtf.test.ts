@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -99,3 +99,20 @@ test("restores the original session when replacement throws", async () => {
 	);
 	assert.equal(readFileSync(sessionFile, "utf-8"), "original\n");
 });
+
+for (const outcome of ["success", "cancel", "throw"] as const) {
+	test(`unflushed session replacement: ${outcome}`, async (t) => {
+		const directory = mkdtempSync(join(tmpdir(), "pi-wtf-unflushed-"));
+		t.after(() => rmSync(directory, { recursive: true, force: true }));
+		const sessionFile = join(directory, "session.jsonl");
+		const replacement = rewriteSessionForReplacement(sessionFile, "new\n", async () => {
+			assert.equal(readFileSync(sessionFile, "utf8"), "new\n");
+			assert.equal(statSync(sessionFile).mode & 0o777, 0o600);
+			if (outcome === "throw") throw new Error("replacement failed");
+			return { cancelled: outcome === "cancel" };
+		});
+		if (outcome === "throw") await assert.rejects(replacement, /replacement failed/);
+		else assert.equal(await replacement, outcome === "success");
+		assert.equal(existsSync(sessionFile), outcome === "success");
+	});
+}
