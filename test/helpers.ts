@@ -126,6 +126,7 @@ export async function createHarness(t: TestContext, options: {
 	const confirmations: string[] = [];
 	const statuses = new Map<string, string | undefined>();
 	const widgets = new Map<string, string[] | undefined>();
+	const widgetUpdates: (string[] | undefined)[] = [];
 	const commands = new Map<string, RegisteredCommand>();
 	type TestEvent = Partial<ExtensionEvent> & { type: ExtensionEvent["type"] };
 	type EventHandler = (event: TestEvent, ctx: ExtensionCommandContext) => unknown;
@@ -142,7 +143,10 @@ export async function createHarness(t: TestContext, options: {
 			setEditorText: (text: string) => { editorText = text; },
 			confirm: async (title: string, message: string) => { confirmations.push(`${title}\n${message}`); return confirmResult; },
 			setStatus: (key: string, value: string | undefined) => { statuses.set(key, value); },
-			setWidget: (key: string, value: string[] | undefined) => { widgets.set(key, value); },
+			setWidget: (key: string, value: string[] | undefined) => {
+				widgets.set(key, value);
+				widgetUpdates.push(value);
+			},
 		},
 		isIdle: () => true,
 		hasPendingMessages: () => false,
@@ -174,7 +178,7 @@ export async function createHarness(t: TestContext, options: {
 	} as unknown as ExtensionAPI);
 
 	return {
-		ctx, emit, notifications, confirmations, statuses, widgets, requests,
+		ctx, emit, notifications, confirmations, statuses, widgets, widgetUpdates, requests,
 		get editorText() { return editorText; },
 		set editorText(value: string) { editorText = value; },
 		set confirmResult(value: boolean) { confirmResult = value; },

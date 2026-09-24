@@ -362,6 +362,11 @@ async function suggestTypoFix(originalPrompt: string, ctx: ExtensionCommandConte
 		throw new Error(settings?.model ? `Unknown typoFix.model: ${settings.model}` : "No model available for typo correction");
 	}
 
+	const thinking = settings?.thinking ?? "unspecified";
+	const progress = `Checking typos: ${model.provider}/${model.id} · thinking: ${thinking} (requested)`;
+	ctx.ui.setStatus("pi-wtf", progress);
+	ctx.ui.setWidget("pi-wtf-typo", [progress]);
+
 	const response = await ctx.modelRegistry
 		.streamSimple(
 			model,
@@ -414,8 +419,6 @@ async function offerTypoFix(
 		return;
 	}
 
-	ctx.ui.setStatus("pi-wtf", "Checking prompt for typos...");
-	ctx.ui.setWidget("pi-wtf-typo", ["pi-wtf: checking restored prompt for typos..."]);
 	try {
 		const suggestion = await suggestTypoFix(originalPrompt, ctx, typoFix);
 		if (suggestion === undefined) {

@@ -23,6 +23,10 @@ for (const accept of [true, false]) {
 		assert.equal(options?.headers?.["x-test"], "authenticated");
 		assert.equal(options?.env?.TEST_REGION, "test-region");
 		assert.equal(options?.cacheRetention, "none");
+		assert.deepEqual(h.widgetUpdates, [
+			["Checking typos: pi-wtf-test/test · thinking: unspecified (requested)"],
+			undefined,
+		]);
 		assert.equal(h.confirmations.length, 1);
 		assert.equal(h.editorText, accept ? "mistake" : "mistkae");
 		assert.equal(h.statuses.get("pi-wtf"), undefined);
@@ -40,6 +44,10 @@ for (const thinking of [undefined, "off", "minimal", "low", "medium", "high", "x
 		assert.equal(h.requests.length, 1);
 		assert.equal(h.requests[0].model.id, "other/model");
 		assert.equal((h.requests[0].options as { reasoning?: string }).reasoning, thinking === "off" ? undefined : thinking);
+		assert.deepEqual(h.widgetUpdates, [
+			[`Checking typos: pi-wtf-test/other/model · thinking: ${thinking ?? "unspecified"} (requested)`],
+			undefined,
+		]);
 		assert.equal(h.ctx.model, sessionModel);
 		assert.equal(h.editorText, "mistake");
 	});
@@ -88,6 +96,7 @@ for (const [original, corrected] of [["/thinkng high", "/thinking high"], ["/bgu
 		h.assistant();
 		await h.run("fuck?");
 		assert.equal(h.editorText, corrected);
+		assert.deepEqual(h.widgetUpdates, []);
 		assert.equal(h.requests.length, 0);
 		assert.equal(h.confirmations.length, 1);
 	});
