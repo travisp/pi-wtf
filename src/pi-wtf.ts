@@ -580,14 +580,10 @@ export default function piWtf(pi: ExtensionAPI) {
 			ctx.switchSession(sessionFile, {
 				withSession: async (replacementCtx) => {
 					replacementCtx.ui.setEditorText(originalPrompt);
-					// Pi reports "Resumed session" after withSession returns, so defer this
-					// notification until the session switch has fully finished.
-					setTimeout(() => {
-						replacementCtx.ui.notify(
-							`${commandName}: navigated back to last prompt and dropped messages from session`,
-							"info",
-						);
-					}, 0);
+					replacementCtx.ui.notify(
+						`${commandName}: navigated back to last prompt and dropped messages from session`,
+						"info",
+					);
 				},
 			}),
 		);

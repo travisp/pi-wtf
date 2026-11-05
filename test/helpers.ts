@@ -28,6 +28,7 @@ import {
 import piWtf from "../src/pi-wtf.ts";
 
 export async function createHarness(t: TestContext, options: {
+	plainReply?: boolean;
 	config?: unknown;
 	configText?: string;
 	suggestion?: string;
@@ -85,10 +86,10 @@ export async function createHarness(t: TestContext, options: {
 		errorMessage: options.stopReason === "error" ? "Test provider failed" : undefined,
 	};
 	const requests: { model: Model<string>; context: TranscriptContext; options?: StreamOptions }[] = [];
-	const stream = (model: Model<string>, context: TranscriptContext, options?: StreamOptions) => {
-		requests.push({ model, context, options });
+	const stream = (model: Model<string>, context: TranscriptContext, requestOptions?: StreamOptions) => {
+		requests.push({ model, context, options: requestOptions });
 		const events = createAssistantMessageEventStream();
-		events.end(correction);
+		events.end(options.plainReply ? reply : correction);
 		return events;
 	};
 	const modelRuntime = await ModelRuntime.create({
@@ -210,6 +211,7 @@ export async function createHarness(t: TestContext, options: {
 	piWtf(api as unknown as ExtensionAPI);
 
 	return {
+		directory, model, modelRuntime, settingsManager,
 		get ctx() { return ctx; },
 		get session() { return session; },
 		emit, notifications, confirmations, statuses, widgets, widgetUpdates, requests,

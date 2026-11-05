@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Keep destructive recovery's success notification inside the replacement-session callback, avoiding stale-context errors on a subsequent session switch.
+- Added real host-runtime recovery, randomized subtree invariants, and failed-write/rename regression tests.
+
 ## 0.3.0
 
 Requires Pi 0.87.1 or newer.
