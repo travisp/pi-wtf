@@ -145,7 +145,7 @@ devbox run -- npm ci --ignore-scripts
 devbox run -- npm run check
 ```
 
-`check` runs TypeScript checking, offline tests against Pi's public session and model APIs, and a package dry-run. CI checks both the locked Pi version and the latest release, including a weekly compatibility run. Tests use an isolated mock provider; no real model credentials or requests are needed.
+`check` runs TypeScript checking, offline tests against Pi's public session and model APIs, and a package dry-run. Tests use an isolated mock provider; no real model credentials or requests are needed.
 
 ## License
 
